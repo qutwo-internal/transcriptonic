@@ -12,31 +12,30 @@
 
 (function () {
   const DEFAULT_URL = "http://127.0.0.1:8765/transcript";
-  const MIN_INTERVAL_MS = 2500;   // throttle bursts; the bridge full-replaces, so a coarse cadence is fine
+  const MIN_INTERVAL_MS = 1500;   // throttle bursts; the bridge full-replaces, so a coarse cadence is fine
+  const HEARTBEAT = "faqutwo-flush";
   let endpoint = DEFAULT_URL;
   let lastFlush = 0;
   let trailing = null;
   let inFlight = false;
 
-  // Cache the endpoint override at load so flush() needs only ONE async hop (storage.local.get) before
-  // the fetch — fewer idle gaps for the event page to suspend in. Refreshed via the onChanged listener.
+  // Cache the endpoint override at load so flush() needs only ONE async hop before the fetch.
   chrome.storage.sync.get(["faqutwoUrl"], (s) => { if (s && s.faqutwoUrl) endpoint = s.faqutwoUrl; });
 
-  // Same block shape upstream uses ({personName, transcriptText, timestamp}); speaker-labelled lines.
-  function fmt(transcript) {
-    if (!Array.isArray(transcript)) return "";
-    return transcript
-      .map(b => `${(b && b.personName) || "?"}: ${(b && b.transcriptText) || ""}`.trim())
-      .filter(Boolean)
-      .join("\n");
-  }
-
+  // The content script mirrors the live transcript (committed blocks + the in-progress utterance buffer
+  // that upstream only commits on speaker-change/meeting-end) into `faqutwoLive` as a ready-to-POST
+  // string. We read that directly. `faqutwoSig` is a persisted signature of the last text we POSTed —
+  // skipping unchanged text means we don't re-POST after a call ends, so the bridge transcript can go
+  // stale and the chat's "transcript" chip can lapse. Persisting it (vs a module var) survives the event
+  // page suspending/waking, which otherwise resets module state and would re-POST stale text on each wake.
   function flush() {
     clearTimeout(trailing); trailing = null;
     lastFlush = Date.now();
-    chrome.storage.local.get(["transcript", "meetingTitle", "meetingSoftware"], (local) => {
-      const text = fmt(local && local.transcript);
+    chrome.storage.local.get(["faqutwoLive", "meetingTitle", "meetingSoftware", "faqutwoSig"], (local) => {
+      const text = (local && local.faqutwoLive) || "";
       if (!text.trim()) return;
+      const sig = text.length + "|" + text.slice(-48);
+      if (sig === (local && local.faqutwoSig)) return;   // unchanged since last successful POST — skip
       inFlight = true;
       fetch(endpoint, {
         method: "POST",
@@ -47,34 +46,42 @@
           source: (local && local.meetingSoftware) || ""
         })
       })
-        .then(r => console.log("faqutwo-sink: POST", r.status, "—", text.length, "chars"))
+        .then(r => {
+          if (r.ok) chrome.storage.local.set({ faqutwoSig: sig });
+          console.log("faqutwo-sink: POST", r.status, "—", text.length, "chars");
+        })
         .catch(e => console.warn("faqutwo-sink: POST failed —", (e && e.message) || e))
         .finally(() => { inFlight = false; });
     });
   }
 
-  // Leading-edge flush. The background is an event page that Firefox suspends seconds after it handles
-  // a storage change — a trailing setTimeout(flush, 4000) gets dropped before it fires, so nothing is
-  // ever sent. Instead, POST immediately on the first change (the in-flight fetch keeps the page alive
-  // until it completes) and only DELAY when we've flushed within MIN_INTERVAL. On every wake the module
-  // state above resets to lastFlush=0, so the first change after a wake always flushes immediately.
+  // Leading-edge flush: POST immediately on the first change (the in-flight fetch keeps the event page
+  // alive until it completes) and only DELAY when we flushed within MIN_INTERVAL. On every wake module
+  // state resets to lastFlush=0, so the first change after a wake always flushes immediately.
   function onChange() {
     const since = Date.now() - lastFlush;
     if (since >= MIN_INTERVAL_MS && !inFlight) {
       flush();
     } else {
       clearTimeout(trailing);
-      trailing = setTimeout(flush, Math.max(250, MIN_INTERVAL_MS - since));
+      trailing = setTimeout(flush, Math.max(200, MIN_INTERVAL_MS - since));
     }
   }
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "sync" && changes.faqutwoUrl) { endpoint = changes.faqutwoUrl.newValue || DEFAULT_URL; return; }
-    if (area !== "local" || (!changes.transcript && !changes.chatMessages)) return;
-    onChange();
+    if (area === "local" && changes.faqutwoLive) onChange();
   });
 
-  console.log("faqutwo-sink: loaded → posting transcript to", endpoint);
+  // Heartbeat. storage.onChanged does NOT reliably wake a suspended Firefox event page, so a periodic
+  // alarm guarantees we flush the latest live transcript even while the background is idle. The content
+  // script keeps `faqutwoLive` current from the always-alive Meet tab; this just wakes us to ship it.
+  try {
+    chrome.alarms.create(HEARTBEAT, { periodInMinutes: 0.5 });
+    chrome.alarms.onAlarm.addListener((a) => { if (a && a.name === HEARTBEAT) flush(); });
+  } catch (_) { /* alarms unavailable — fall back to onChanged only */ }
+
+  console.log("faqutwo-sink: loaded → posting live transcript to", endpoint);
 })();
 
 // Reliability fix (Firefox). Two upstream gaps break Meet capture in Firefox:

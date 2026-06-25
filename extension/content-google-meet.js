@@ -32,6 +32,29 @@ let personNameBuffer = "", transcriptTextBuffer = "", timestampBuffer = ""
 /** @type {ChatMessage[]} */
 let chatMessages = []
 
+// faqutwo (qutwo-internal fork addition; NOT upstream). Live-stream the IN-PROGRESS transcript.
+// Upstream only commits the active utterance buffer into `transcript` (and thus into chrome.storage,
+// which the faqutwo background sink watches) on a SPEAKER CHANGE or at MEETING END. With a single
+// continuous speaker that never happens mid-call, so storage never updates and nothing streams to the
+// faqutwo bridge until the meeting ends. Here we mirror the committed blocks PLUS the live buffer into a
+// dedicated `faqutwoLive` key (a ready-to-POST speaker-labelled string) on a short interval — deduped, so
+// we only write (and only wake the background) when the text actually changes. Best-effort and isolated:
+// it reads existing globals and touches no upstream logic, keeping `git merge upstream/main` clean.
+let faqutwoLastLive = ""
+setInterval(() => {
+  try {
+    const lines = transcript.map(b => `${(b && b.personName) || "?"}: ${(b && b.transcriptText) || ""}`.trim())
+    if (transcriptTextBuffer && transcriptTextBuffer.trim()) {
+      const who = personNameBuffer === "You" ? userName : (personNameBuffer || userName)
+      lines.push(`${who}: ${transcriptTextBuffer}`.trim())
+    }
+    const text = lines.filter(Boolean).join("\n")
+    if (text === faqutwoLastLive) return
+    faqutwoLastLive = text
+    chrome.storage.local.set({ faqutwoLive: text })
+  } catch (_) { /* best-effort */ }
+}, 2000)
+
 /** @type {MeetingSoftware} */
 const meetingSoftware = "Google Meet"
 
