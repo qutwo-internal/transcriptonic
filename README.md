@@ -13,6 +13,11 @@ Override the endpoint with `chrome.storage.sync.set({faqutwoUrl: "..."})` if nee
 
 Sync upstream:  git fetch upstream && git merge upstream/main   (our delta is additive, so
 this is normally clean; hand-resolve only if upstream rewrites the very top of background.js).
+
+Release (Firefox auto-update): ./release.sh  (bumps the version, signs via AMO, publishes the
+signed .xpi to GitHub Releases, regenerates updates.json). Installed copies poll the manifest's
+gecko.update_url (raw updates.json) and auto-update to the newest published version within ~a day.
+So updates reach browsers when WE run release.sh — upstream changes only after a merge + release.
 ──────────────────────────────────────────────────────────────────────────── -->
 
 # TranscripTonic

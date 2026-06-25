@@ -39,6 +39,7 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "transcriptonic-faqutwo@qutwo.internal",
+      "update_url": "https://raw.githubusercontent.com/qutwo-internal/faqutwo-transcript-browser-extension/main/updates.json",
       "strict_min_version": "140.0",
       "data_collection_permissions": { "required": ["none"] }
     }
